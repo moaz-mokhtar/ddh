@@ -3,7 +3,7 @@
 //! `ddh` is a collection of functions and structs to aid in analysing filesystem directories.
 
 use std::hash::{Hasher};
-use std::fs::{self, DirEntry};
+use std::fs::{self, DirEntry, Metadata};
 use std::io::{Read};
 use std::path::{PathBuf, Path};
 use std::cmp::Ordering;
@@ -34,7 +34,7 @@ pub struct Fileinfo{
     full_hash: Option<u128>,
     partial_hash: Option<u128>,
     file_length: u64,
-    file_paths: Vec<PathBuf>,
+    instances: Vec<(PathBuf, Metadata)>,
 }
 
 impl Fileinfo{
@@ -52,11 +52,11 @@ impl Fileinfo{
     ///         Path::new("./foo/bar.txt").to_path_buf()
     ///         );
     /// ```
-    pub fn new(full_hash: Option<u128>, partial_hash: Option<u128>, length: u64, path: PathBuf) -> Self{
-        Fileinfo{full_hash: full_hash, partial_hash: partial_hash, file_length: length, file_paths: vec![path]}
+    pub fn new(full_hash: Option<u128>, partial_hash: Option<u128>, length: u64, (path, meta): (PathBuf, Metadata)) -> Self{
+        Fileinfo{full_hash: full_hash, partial_hash: partial_hash, file_length: length, instances: vec![(path, meta)]}
     }
     /// Gets the length of the files in the current collection.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::path::Path;
@@ -70,7 +70,7 @@ impl Fileinfo{
         self.file_length
     }
     /// Gets the hash of the full file if available.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::path::Path;
@@ -87,7 +87,7 @@ impl Fileinfo{
         self.full_hash = hash
     }
     /// Gets the hash of the partially read file if available.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::path::Path;
@@ -104,7 +104,7 @@ impl Fileinfo{
         self.partial_hash = hash
     }
     /// Gets a candidate name. This will be the name of the first file inserted into the collection and so can vary.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::path::Path;
@@ -115,10 +115,11 @@ impl Fileinfo{
     /// assert_eq!("bar.txt", some_name)
     /// ```
     pub fn get_candidate_name(&self) -> &str{
-        self.file_paths
+        self.instances
         .iter()
         .next()
         .unwrap()
+        .0
         .to_str()
         .unwrap()
         .rsplit("/")
@@ -126,7 +127,7 @@ impl Fileinfo{
         .unwrap()
     }
     /// Gets all paths in the current collection. This can be used to get the names of each file with the string `rsplit("/")` method.
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::path::Path;
@@ -138,16 +139,21 @@ impl Fileinfo{
     ///            all_files);
     /// ```
     pub fn get_paths(&self) -> &Vec<PathBuf>{
-        return &self.file_paths
+        return &self
+                .instances
+                .iter()
+                .map(|x| x.0)
+                .collect()
     }
 
     fn generate_hash(&mut self, mode: HashMode) -> Option<u128>{
         let mut hasher = siphasher::sip128::SipHasher::new();
         match fs::File::open(
-            self.file_paths
+            self.instances
             .iter()
             .next()
             .expect("Cannot read file path from struct")
+            .0
             ) {
             Ok(mut f) => {
                 /* We want a read call to be "large" for two reasons
@@ -268,7 +274,7 @@ fn traverse_and_spawn(current_path: &Path, sender: Sender<ChannelPackage>) -> ()
                 None,
                 None,
                 current_path.metadata().expect("Error reading path length").len(),
-                current_path.to_path_buf()
+                (current_path.to_path_buf(), current_path_metadata),
                 ))
             ).expect("Error sending new ChannelPackage::Success");
         return
@@ -289,15 +295,16 @@ fn traverse_and_spawn(current_path: &Path, sender: Sender<ChannelPackage>) -> ()
                         .file_type()
                         .is_file()
                         );
-                    files.par_iter().for_each_with(sender.clone(), |sender, x|
+                    files
+                        .par_iter()
+                        .for_each_with(sender.clone(), |sender, x|
                         sender.send(ChannelPackage::Success(
                             Fileinfo::new(
                                 None,
                                 None,
                                 x.metadata().expect("Error reading path length").len(),
-                                x.path()))
-                                ).expect("Error sending new ChannelPackage::Success")
-                            );
+                                (x.path(), x.metadata().expect("Error reading path metadata"))
+                        ))).expect("Error sending new ChannelPackage::Success"));
                     dirs.into_par_iter()
                     .for_each_with(sender, |sender, x| {
                             traverse_and_spawn(x.path().as_path(), sender.clone());
@@ -365,8 +372,8 @@ fn dedupe(mut files: Vec<Fileinfo>) -> Vec<Fileinfo>{
                     },
                     Entry::Occupied(mut e) => {
                         e.get_mut()
-                        .file_paths
-                        .append(&mut file.file_paths);
+                        .instances
+                        .append(&mut file.instances);
                     }
                 }
     }
